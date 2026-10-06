@@ -1,0 +1,334 @@
+---
+title: "Isochrones"
+format: html
+editor: visual
+---
+
+An **isochrone** is a line or polygon on a map that connects all points reachable from a specific starting location within a set amount of time
+
+[Inspiration from Kyle Walker](https://walker-data.com/posts/accessibility-surface/)
+
+### Libraries
+
+```{r}
+library(mapboxapi)
+library(leaflet)
+library(mapview)
+```
+
+### Create Isochrone
+
+```{r}
+isos <- mb_isochrone(
+  location = "One Bowerman Dr, Beaverton, OR 97005",
+  profile = "driving",
+  time = 1:45
+)
+```
+
+```{r}
+mapview(isos, zcol = "time")
+```
+
+```{r}
+library(sf)
+library(fasterize)
+
+isos_proj <- st_transform(isos, 32618)
+
+template <- raster(isos_proj, resolution = 100)
+
+iso_surface <- fasterize(isos_proj, template, field = "time", fun = "min")
+
+iso_surface
+pal <- colorNumeric("plasma", isos$time, na.color = "transparent")
+
+nike_map <- leaflet() %>%
+  addMapboxTiles(style_id = "light-v9",
+                 username = "mapbox",
+                 scaling_factor = "0.5x") %>%
+  addRasterImage(iso_surface, colors = pal, opacity = 0.5) %>%
+  addLegend(values = isos$time, pal = pal,
+            title = "Drive-time from<br>Nike HQ")
+
+nike_map
+```
+
+```{r}
+nike_icon <- makeIcon(
+  iconUrl = "https://nike.com/favicon.ico",
+  iconWidth = 25,
+  iconHeight = 25
+)
+
+nike_hq <- mb_geocode("One Bowerman Dr, Beaverton, OR 97005")
+
+nike_map %>%
+  addMarkers(lng = nike_hq[1], lat = nike_hq[2], icon = nike_icon)
+```
+
+### Your turn - Recreate for Chaminade
+
+```{r}
+chaminade_isos <- mb_isochrone(
+  location = "3140 Waialae Ave, Honolulu, HI 96816",
+  profile = "driving-traffic",
+  time = 1:60
+)
+
+mapview(chaminade_isos, zcol = "time")
+
+chaminade_proj <- st_transform(chaminade_isos, 32604)
+
+chaminade_template <- raster(chaminade_proj, resolution = 100)
+
+chaminade_surface <- fasterize(chaminade_proj, chaminade_template, field = "time", fun = "min")
+
+chaminade_pal <- colorNumeric("plasma", chaminade_isos$time, na.color = "transparent")
+
+chaminade_map <- leaflet() %>%
+  addMapboxTiles(style_id = "light-v9",
+                 username = "mapbox",
+                 scaling_factor = "0.5x") %>%
+  addRasterImage(chaminade_surface, colors = chaminade_pal, opacity = 0.5) %>%
+  addLegend(values = chaminade_isos$time, pal = chaminade_pal,
+            title = "Driving traffic-time from<br>chaminade")
+
+chaminade_map
+```
+
+```{r}
+chaminade_icon <- makeIcon(
+  iconUrl = "https://chaminade.edu/favicon.ico",
+  iconWidth = 25,
+  iconHeight = 25
+)
+
+chaminade_loc <- mb_geocode("3140 Waialae Ave, Honolulu, HI 96816")
+
+chaminade_map %>%
+  addMarkers(lng = chaminade_loc[1], lat = chaminade_loc[2],
+             icon = chaminade_icon)
+
+### for this I got help from Claude not going lie. 
+```
+
+### Lets go further
+
+Question: Can we make an accessibility surfaces map for trauma centers, ER's, hospitals, fire stations etc. Maybe combine all of them into one shiny app. Let's strategise and design...
+
+App design:
+
+fire stations - mb_isochrone works well
+
+ambulance -
+
+shelters - Das me
+
+cant go off base travel time in island wide emergency situation
+
+hospitals, trauma centers, etc...
+
+senior / etc transportation
+
+swim, lifeguard response
+
+-- shelters - Das me (and kyle ig) —
+
+```{r}
+library(dplyr)
+library(sf)
+library(raster)
+library(fasterize)
+library(mapboxapi)
+library(leaflet)
+library(mapview)
+
+# Oahu boundary (used to clip and to keep geocoding on-island)
+oahu_bbox <- c(-158.30, 21.24, -157.63, 21.72)
+oahu_box  <- st_as_sfc(st_bbox(c(xmin = -158.30, ymin = 21.24,
+                                 xmax = -157.63, ymax = 21.72), crs = 4326))
+
+# 1. FEMA shelters (general population, medical, evacuation)
+url <- paste0(
+  "https://gis.fema.gov/arcgis/rest/services/NSS/FEMA_NSS/FeatureServer/5/query?",
+  "where=state%3D%27HI%27&outFields=*&f=geojson"
+)
+
+fema <- st_read(url, quiet = TRUE) %>%
+  st_filter(oahu_box) %>%
+  dplyr::transmute(
+    name = shelter_name,
+    capacity = as.numeric(evacuation_capacity),
+    capacity_after = as.numeric(post_impact_capacity),
+    type = case_when(
+      subfacility_code == "GENPOPSHEL" ~ "General population",
+      subfacility_code == "MEDBNS" ~ "Medical / basic needs",
+      subfacility_code %in% c("EMEREVAC", "EVAC") ~ "Emergency evacuation",
+      TRUE ~ "Other"
+    )
+  )
+
+# 2. Hurricane refuge areas (opened for Tropical Storm Lala, Aug 2026)
+refuge_names <- c(
+  "Blanche Pope Elementary School, Waimanalo, HI",
+  "Castle High School, Kaneohe, HI",
+  "Kahuku Elementary School, Kahuku, HI",
+  "Kapolei High School, Kapolei, HI",
+  "Mililani High School, Mililani, HI",
+  "Moanalua High School, Honolulu, HI",
+  "89-778 Haleakala Ave, Waianae, HI 96792",
+  "Roosevelt High School, Honolulu, HI"
+)
+
+refuge <- lapply(refuge_names, mb_geocode,
+                 search_within = oahu_bbox, output = "sf") %>%
+  bind_rows() %>%
+  dplyr::transmute(name = refuge_names,
+                   capacity = NA_real_, capacity_after = NA_real_,
+                   type = "Hurricane refuge area")
+
+# 3. Combine and clip to Oahu
+shelters <- bind_rows(fema, refuge) %>%
+  st_filter(oahu_box)
+
+# Checks
+table(shelters$type)
+nrow(shelters)                       # should be 419
+nrow(distinct(shelters, geometry))   # unique locations
+
+mapview(shelters, zcol = "type", map.types = "OpenStreetMap")
+```
+
+```{r}
+
+dir.create("isos_parts", showWarnings = FALSE)
+batches <- split(seq_len(nrow(shelters_unique)),
+                 ceiling(seq_len(nrow(shelters_unique)) / 50))
+
+for (b in seq_along(batches)) {
+  part_file <- paste0("isos_parts/part_", b, ".rds")
+  if (file.exists(part_file)) next
+  
+  part <- lapply(batches[[b]], function(i) {
+    Sys.sleep(0.5)
+    mb_isochrone(shelters_unique[i, ], profile = "driving",
+                 time = c(5, 10, 15, 20, 25, 30))
+  }) %>% bind_rows()
+  
+  saveRDS(part, part_file)
+  message("Batch ", b, " of ", length(batches), " done")
+}
+
+isos_all <- list.files("isos_parts", full.names = TRUE) %>%
+  lapply(readRDS) %>%
+  bind_rows()
+```
+
+```{r}
+shelters %>%
+  st_drop_geometry() %>%
+  arrange(type, name) %>%
+  View()
+```
+
+```{r}
+waianae_box <- st_as_sfc(st_bbox(c(xmin = -158.25, ymin = 21.35,
+                                   xmax = -158.10, ymax = 21.55), crs = 4326))
+
+shelters_waianae <- st_filter(shelters_unique, waianae_box)
+nrow(shelters_waianae)
+```
+
+```{r}
+waianae_isos <- mb_isochrone(
+  location = shelters_waianae,
+  profile = "driving-traffic",
+  time = c(5, 10, 15, 20, 25, 30)
+)
+
+saveRDS(waianae_isos, "waianae_isos.rds")
+
+mapview(waianae_isos, zcol = "time")
+
+waianae_proj <- st_transform(waianae_isos, 32604)
+
+waianae_template <- raster(waianae_proj, resolution = 100)
+
+waianae_surface <- fasterize(waianae_proj, waianae_template, field = "time", fun = "min")
+
+waianae_pal <- colorNumeric("plasma", waianae_isos$time, na.color = "transparent")
+
+waianae_map <- leaflet() %>%
+  addMapboxTiles(style_id = "light-v9",
+                 username = "mapbox",
+                 scaling_factor = "0.5x") %>%
+  addRasterImage(waianae_surface, colors = waianae_pal, opacity = 0.5) %>%
+  addLegend(values = waianae_isos$time, pal = waianae_pal,
+            title = "Driving traffic-time to<br>nearest shelter (Waianae)")
+
+waianae_map
+```
+
+```{r}
+get_isos <- function(pts, profile) {
+  folder <- paste0("isos_", profile)
+  dir.create(folder, showWarnings = FALSE)
+  batches <- split(seq_len(nrow(pts)), ceiling(seq_len(nrow(pts)) / 50))
+  
+  for (b in seq_along(batches)) {
+    part_file <- file.path(folder, paste0("part_", b, ".rds"))
+    if (file.exists(part_file)) next
+    part <- lapply(batches[[b]], function(i) {
+      Sys.sleep(0.5)
+      mb_isochrone(pts[i, ], profile = profile,
+                   time = c(5, 10, 15, 20, 25, 30))
+    }) %>% bind_rows()
+    saveRDS(part, part_file)
+    message(profile, ": batch ", b, " of ", length(batches), " done")
+  }
+  
+  list.files(folder, full.names = TRUE) %>% lapply(readRDS) %>% bind_rows()
+}
+
+drive_isos <- get_isos(shelters_unique, "driving")
+walk_isos  <- get_isos(shelters_unique, "walking")
+```
+
+```{r}
+drive_proj <- st_transform(drive_isos, 32604)
+walk_proj  <- st_transform(walk_isos, 32604)
+
+template <- raster(drive_proj, resolution = 100)
+
+drive_surface <- fasterize(drive_proj, template, field = "time", fun = "min")
+walk_surface  <- fasterize(walk_proj,  template, field = "time", fun = "min")
+```
+
+```{r}
+# install.packages("leafem") if needed
+library(leafem)
+
+pal <- colorNumeric("plasma", c(5, 30), na.color = "transparent")
+
+shelter_map <- leaflet() %>%
+  addMapboxTiles(style_id = "light-v9", username = "mapbox",
+                 scaling_factor = "0.5x") %>%
+  addRasterImage(drive_surface, colors = pal, opacity = 0.5,
+                 group = "Driving", layerId = "Driving") %>%
+  addRasterImage(walk_surface, colors = pal, opacity = 0.5,
+                 group = "Walking", layerId = "Walking") %>%
+  addImageQuery(drive_surface, layerId = "Driving", group = "Driving",
+                type = "mousemove", digits = 0, prefix = "Minutes to shelter") %>%
+  addImageQuery(walk_surface, layerId = "Walking", group = "Walking",
+                type = "mousemove", digits = 0, prefix = "Minutes to shelter") %>%
+  addCircleMarkers(data = shelters_unique, radius = 3, color = "black",
+                   weight = 1, fillColor = "white", fillOpacity = 1,
+                   label = ~paste0(name, " (", type, ")")) %>%
+  addLayersControl(baseGroups = c("Driving", "Walking"),
+                   options = layersControlOptions(collapsed = FALSE)) %>%
+  addLegend(values = c(5, 30), pal = pal,
+            title = "Minutes to<br>nearest shelter")
+
+shelter_map
+```
